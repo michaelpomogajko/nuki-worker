@@ -1,0 +1,12 @@
+#:schema node_modules/wrangler/config-schema.json
+name = "nuki"
+main = "src/index.ts"
+compatibility_date = "2024-04-05"
+
+[[durable_objects.bindings]]
+name = "TIMEOUT"
+class_name = "TimeoutObject"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["TimeoutObject"]
