@@ -1,89 +1,98 @@
-import { Env, Hono } from 'hono';
-import { DurableObject, env } from 'cloudflare:workers';
+import { Hono } from 'hono';
+import { WorkflowEntrypoint } from 'cloudflare:workers';
+import type { WorkflowEvent, WorkflowStep, WorkflowStepConfig } from 'cloudflare:workers';
 import { type } from 'arktype';
 import { arktypeValidator } from '@hono/arktype-validator';
 
-// Hono app for the Worker
 const app = new Hono<{ Bindings: CloudflareBindings }>();
 
-// Nuki API configuration
 const NUKI_API_BASE = 'https://api.nuki.io';
+const FLOOR_OPEN_DELAY = '50 seconds';
+const OPEN_STEP_CONFIG = {
+	retries: {
+		limit: 1,
+		delay: '3 seconds',
+		backoff: 'linear',
+	},
+} satisfies WorkflowStepConfig;
 
 const queryType = type({
 	action: "'street' | 'floor' | 'both'"
 });
 
 type Action = typeof queryType.infer.action;
+type Door = Exclude<Action, 'both'>;
+type DoorOpenWorkflowParams = {
+	action: Action;
+};
+type DoorOpenResult = {
+	success: true;
+	door: Door;
+	message: string;
+};
+type DoorOpenWorkflowResult =
+	| {
+		action: Door;
+		door: DoorOpenResult;
+	}
+	| {
+		action: 'both';
+		door1: DoorOpenResult;
+		door2: DoorOpenResult;
+	};
 
-
-// Function to open a Nuki smart lock
-async function openDoor(door: Action) {
+function getDoorId(door: Door, bindings: CloudflareBindings) {
 	const doorId = {
-		street: env.STREET_ID,
-		floor: env.FLOOR_ID,
-		both: undefined,
+		street: bindings.STREET_ID,
+		floor: bindings.FLOOR_ID,
 	}[door];
 
 	if (!doorId) {
 		throw new Error('Invalid door action');
 	}
 
-	try {
-		const response = await fetch(`${NUKI_API_BASE}/smartlock/${doorId}/action/unlock`, {
-			method: 'POST',
-			headers: {
-				'Authorization': `Bearer ${env.NUKI_API_KEY}`,
-				'Content-Type': 'application/json',
-			},
-		});
-
-		if (!response.ok) {
-			throw new Error(`Failed to open ${door.toUpperCase()}: ${response.statusText}`);
-		}
-
-		const message = `${door.toUpperCase()} unlocked successfully`;
-		console.log(message);
-
-		return { success: true, message };
-	} catch (error: any) {
-		const message = `Error opening ${door.toUpperCase()}: ${error.message}`;
-		console.error(message);
-		return { success: false, message };
-	}
+	return doorId;
 }
 
-// Durable Object for delayed door opening
-export class DoorOpener extends DurableObject<Env> {
-	constructor(ctx: DurableObjectState, env: Env) {
-		super(ctx, env);
-		this.ctx = ctx;
+async function openDoor(door: Door, bindings: CloudflareBindings): Promise<DoorOpenResult> {
+	const doorId = getDoorId(door, bindings);
+	const response = await fetch(`${NUKI_API_BASE}/smartlock/${doorId}/action/unlock`, {
+		method: 'POST',
+		headers: {
+			'Authorization': `Bearer ${bindings.NUKI_API_KEY}`,
+			'Content-Type': 'application/json',
+		},
+	});
+
+	if (!response.ok) {
+		const details = await response.text().catch(() => '');
+		const suffix = details ? `: ${details}` : '';
+		throw new Error(`Failed to open ${door.toUpperCase()}: ${response.status} ${response.statusText}${suffix}`);
 	}
 
-	async fetch(request: Request) {
-		const url = new URL(request.url);
-		const action = url.searchParams.get('action');
+	const message = `${door.toUpperCase()} unlocked successfully`;
+	console.log(message);
+
+	return { success: true, door, message };
+}
+
+export class DoorOpenWorkflow extends WorkflowEntrypoint<CloudflareBindings, DoorOpenWorkflowParams> {
+	async run(event: WorkflowEvent<DoorOpenWorkflowParams>, step: WorkflowStep): Promise<DoorOpenWorkflowResult> {
+		const { action } = event.payload;
 
 		if (action === 'both') {
-			await this.ctx.storage.setAlarm(Date.now() + 50 * 1000);
+			const door1 = await step.do('open street door', OPEN_STEP_CONFIG, () => openDoor('street', this.env));
+			await step.sleep('wait before floor door', FLOOR_OPEN_DELAY);
+			const door2 = await step.do('open floor door', OPEN_STEP_CONFIG, () => openDoor('floor', this.env));
 
-			const message = 'Alarm scheduled for 2nd door';
-			console.log(message);
-			return new Response(JSON.stringify({ success: true, message }), {
-				headers: { 'Content-Type': 'application/json' },
-			});
+			return { action, door1, door2 };
 		}
 
-		return new Response(JSON.stringify({ success: false, message: 'Invalid action' }), {
-			headers: { 'Content-Type': 'application/json' },
-		});
-	}
-
-	async alarm() {
-		await openDoor('floor');
+		const door = await step.do(`open ${action} door`, OPEN_STEP_CONFIG, () => openDoor(action, this.env));
+		return { action, door };
 	}
 }
 
-// Main Worker route handler
 app.get('/open', arktypeValidator('query', queryType), async (c) => {
 	const action = c.req.valid('query').action;
 
@@ -91,29 +100,37 @@ app.get('/open', arktypeValidator('query', queryType), async (c) => {
 		return c.json({ error: 'Invalid authorization' }, 401);
 	}
 
-
 	try {
-		if (action !== 'both') {
-			const result = await openDoor(action);
-			return c.json(result);
-		}
-
-		const streetResult = await openDoor('street');
-		if (!streetResult.success) {
-			return c.json(streetResult, 500);
-		}
-
-		const id = c.env.DOOR_OPENER.idFromName('door-opener');
-		const stub = c.env.DOOR_OPENER.get(id);
-		const response = await stub.fetch(new Request(c.req.url));
-		const floorResult = await response.json();
+		const instance = await c.env.DOOR_OPEN_WORKFLOW.create({
+			params: { action },
+		});
 
 		return c.json({
-			door1: streetResult,
-			door2: floorResult,
-		});
+			success: true,
+			message: `Door opening workflow started for ${action.toUpperCase()}`,
+			instanceId: instance.id,
+			status: await instance.status(),
+		}, 202);
 	} catch (error: any) {
 		return c.json({ error: `Server error: ${error.message}` }, 500);
+	}
+});
+
+app.get('/open/:instanceId', async (c) => {
+	if (c.req.header('Authorization') !== c.env.AUTH_KEY) {
+		return c.json({ error: 'Invalid authorization' }, 401);
+	}
+
+	try {
+		const instanceId = c.req.param('instanceId');
+		const instance = await c.env.DOOR_OPEN_WORKFLOW.get(instanceId);
+
+		return c.json({
+			instanceId,
+			status: await instance.status(),
+		});
+	} catch (error: any) {
+		return c.json({ error: `Workflow lookup failed: ${error.message}` }, 404);
 	}
 });
 

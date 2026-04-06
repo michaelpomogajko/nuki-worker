@@ -11,19 +11,13 @@
 	"observability": {
 		"enabled": true
 	},
-	"durable_objects": {
-		"bindings": [
-			{
-				"name": "DOOR_OPENER",
-				"class_name": "DoorOpener"
-			}
-		]
-	},
-
-	"migrations": [{
-		"tag": "v1",
-		"new_classes": ["DoorOpener"]
-	}]
+	"workflows": [
+		{
+			"name": "nuki-door-open",
+			"binding": "DOOR_OPEN_WORKFLOW",
+			"class_name": "DoorOpenWorkflow"
+		}
+	],
 	/**
 	 * Smart Placement
 	 * Docs: https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
