@@ -18,6 +18,16 @@
 			"class_name": "DoorOpenWorkflow"
 		}
 	],
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_classes": ["DoorOpener"]
+		},
+		{
+			"tag": "v2",
+			"deleted_classes": ["DoorOpener"]
+		}
+	],
 	/**
 	 * Smart Placement
 	 * Docs: https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
