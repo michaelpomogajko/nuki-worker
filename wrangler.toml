@@ -1,0 +1,22 @@
+# For more details on how to configure Wrangler, refer to:
+# https://developers.cloudflare.com/workers/wrangler/configuration/
+name = "nuki-worker"
+main = "src/index.ts"
+compatibility_date = "2026-04-06"
+workers_dev = true
+
+[observability]
+enabled = true
+
+[[workflows]]
+name = "nuki-door-open"
+binding = "DOOR_OPEN_WORKFLOW"
+class_name = "DoorOpenWorkflow"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["DoorOpener"]
+
+[[migrations]]
+tag = "v2"
+deleted_classes = ["DoorOpener"]
