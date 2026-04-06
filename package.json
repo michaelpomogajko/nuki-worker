@@ -6,12 +6,11 @@
 		"cf-typegen": "wrangler types --env-interface CloudflareBindings"
 	},
 	"dependencies": {
-		"@hono/arktype-validator": "^2.0.0",
-		"arktype": "^2.1.19",
-		"hono": "^4.7.5"
+		"@hono/arktype-validator": "^2.0.1",
+		"arktype": "^2.2.0",
+		"hono": "^4.12.11"
 	},
 	"devDependencies": {
-		"@cloudflare/workers-types": "^4.20250410.0",
-		"wrangler": "^4.10.0"
+		"wrangler": "^4.80.0"
 	}
 }
