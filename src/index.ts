@@ -11,10 +11,14 @@ const FLOOR_OPEN_DELAY = '50 seconds';
 const OPEN_STEP_CONFIG = {
 	retries: {
 		limit: 1,
-		delay: '3 seconds',
+		// Nuki returns 423 Locked while the lock is still executing a previous
+		// command; a short retry lands inside that busy window
+		delay: '20 seconds',
 		backoff: 'linear',
 	},
 } satisfies WorkflowStepConfig;
+const DEDUPE_WINDOW_MS = 60_000;
+const ACTIVE_STATUSES: InstanceStatus['status'][] = ['queued', 'running', 'paused', 'waiting', 'waitingForPause'];
 
 const queryType = type({
 	action: "'street' | 'floor' | 'both'"
@@ -100,10 +104,36 @@ app.get('/open', arktypeValidator('query', queryType), async (c) => {
 		return c.json({ error: 'Invalid authorization' }, 401);
 	}
 
+	// A duplicate trigger while a run is in flight makes Nuki reject the second
+	// unlock with 423 Locked, so runs within the same window share one instance id
+	const dedupeId = `${action}-${Math.floor(Date.now() / DEDUPE_WINDOW_MS)}`;
+
 	try {
-		const instance = await c.env.DOOR_OPEN_WORKFLOW.create({
-			params: { action },
-		});
+		let instance;
+		try {
+			instance = await c.env.DOOR_OPEN_WORKFLOW.create({
+				id: dedupeId,
+				params: { action },
+			});
+		} catch {
+			const existing = await c.env.DOOR_OPEN_WORKFLOW.get(dedupeId).catch(() => null);
+			const existingStatus = existing && await existing.status();
+
+			if (existingStatus && ACTIVE_STATUSES.includes(existingStatus.status)) {
+				return c.json({
+					success: true,
+					deduped: true,
+					message: `Door opening already in progress for ${action.toUpperCase()}`,
+					instanceId: dedupeId,
+					status: existingStatus,
+				}, 200);
+			}
+
+			// id is taken by a finished run from earlier in this window
+			instance = await c.env.DOOR_OPEN_WORKFLOW.create({
+				params: { action },
+			});
+		}
 
 		return c.json({
 			success: true,
